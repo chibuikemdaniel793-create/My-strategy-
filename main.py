@@ -6,15 +6,16 @@ import numpy as np
 import websockets
 import threading
 import time
+import traceback
 
 # =========================
-# ENV (DEMO ONLY)
+# ENV (SAFE MODE)
 # =========================
-APP_ID = os.getenv("DERIV_APP_ID")
-TOKEN = os.getenv("DERIV_API_TOKEN_DEMO")
+APP_ID = os.getenv("DERIV_APP_ID", "1089")
+TOKEN = os.getenv("DERIV_API_TOKEN_DEMO", "")
 
-TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
 WS_URL = f"wss://ws.derivws.com/websockets/v3?app_id={APP_ID}"
 
@@ -35,9 +36,11 @@ account = {
 # TELEGRAM
 # =========================
 def send(msg):
-    url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
-    requests.post(url, data={"chat_id": CHAT_ID, "text": msg})
-
+    try:
+        url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
+        requests.post(url, data={"chat_id": CHAT_ID, "text": msg})
+    except:
+        pass
 
 # =========================
 # RSI
@@ -55,7 +58,6 @@ def rsi(closes, period=14):
 
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
-
 
 # =========================
 # MACD
@@ -77,11 +79,13 @@ def macd(closes):
 
     return m[-1], s[-1]
 
-
 # =========================
-# CANDLE STREAK (>=3)
+# CANDLE STREAK
 # =========================
 def streak(c):
+    if len(c) < 3:
+        return None, 0
+
     last = c[-1]
     direction = "GREEN" if last["close"] > last["open"] else "RED"
     count = 1
@@ -97,12 +101,10 @@ def streak(c):
 
     return direction, count
 
-
 # =========================
 # STRATEGY
 # =========================
 def check(symbol, c):
-
     if len(c) < 20:
         return None
 
@@ -124,25 +126,23 @@ def check(symbol, c):
 
     return None
 
-
 # =========================
-# ACCOUNT UPDATE
+# ACCOUNT
 # =========================
 def update_account(msg):
-    global account
-
-    if "balance" in msg:
-        b = msg["balance"]
-        account["balance"] = b.get("balance", 0)
-        account["currency"] = b.get("currency", "")
-        account["profit"] = b.get("profit", 0)
-
+    try:
+        if msg.get("balance"):
+            b = msg["balance"]
+            account["balance"] = b.get("balance", 0)
+            account["currency"] = b.get("currency", "")
+            account["profit"] = b.get("profit", 0)
+    except:
+        pass
 
 # =========================
-# TELEGRAM CONTROL PANEL
+# TELEGRAM CONTROL
 # =========================
 def telegram_listener():
-
     global bot_running
 
     last = 0
@@ -162,22 +162,20 @@ def telegram_listener():
                 text = u.get("message", {}).get("text", "")
 
                 if text == "/start":
-                    send("✅ DEMO BOT ACTIVE\nScanning M1 markets...")
+                    send("✅ BOT ACTIVE (DEMO MODE)\nScanning M1 markets...")
 
                 elif text == "/stop":
                     bot_running = False
                     send("🛑 BOT STOPPED")
 
                 elif text == "/status":
-                    send(f"📊 RUNNING: {bot_running}\nMODE: DEMO ONLY")
+                    send(f"RUNNING: {bot_running}\nMODE: DEMO")
 
                 elif text == "/balance":
                     send(f"""
 💰 DEMO ACCOUNT
-
 Balance: {account['balance']} {account['currency']}
 Profit: {account['profit']}
-Mode: DEMO ONLY
 """)
 
         except:
@@ -185,93 +183,103 @@ Mode: DEMO ONLY
 
         time.sleep(3)
 
-
 # =========================
-# DERIV ENGINE (M1 ONLY)
+# DERIV ENGINE
 # =========================
 async def run():
-
     global candles
 
-    async with websockets.connect(WS_URL) as ws:
+    try:
+        async with websockets.connect(WS_URL) as ws:
 
-        # AUTH
-        await ws.send(json.dumps({"authorize": TOKEN}))
-        await ws.recv()
+            # AUTH
+            await ws.send(json.dumps({"authorize": TOKEN}))
+            await ws.recv()
 
-        # DEMO BALANCE STREAM
-        await ws.send(json.dumps({
-            "balance": 1,
-            "subscribe": 1
-        }))
+            # BALANCE STREAM
+            await ws.send(json.dumps({"balance": 1, "subscribe": 1}))
 
-        # SYMBOLS
-        await ws.send(json.dumps({
-            "active_symbols": "full",
-            "product_type": "basic"
-        }))
-
-        symbols = json.loads(await ws.recv())["active_symbols"]
-        symbols = [s["symbol"] for s in symbols]
-
-        send(f"📊 Loaded {len(symbols)} symbols (DEMO MODE)")
-
-        # M1 CANDLES ONLY
-        for sym in symbols:
+            # SYMBOLS REQUEST
             await ws.send(json.dumps({
-                "ticks_history": sym,
-                "adjust_start_time": 1,
-                "count": 60,
-                "end": "latest",
-                "granularity": 60,   # 1 MINUTE
-                "style": "candles",
-                "subscribe": 1
+                "active_symbols": "full",
+                "product_type": "basic"
             }))
 
-        while bot_running:
+            # SAFE SYMBOL READ
+            symbols = []
+            while True:
+                msg = json.loads(await ws.recv())
 
-            msg = json.loads(await ws.recv())
+                if "error" in msg:
+                    continue
 
-            # ACCOUNT
-            if "balance" in msg:
+                if "active_symbols" in msg:
+                    symbols = [s["symbol"] for s in msg["active_symbols"]]
+                    break
+
+            send(f"📊 Loaded {len(symbols)} symbols (DEMO MODE)")
+
+            # SUBSCRIBE CANDLES
+            for sym in symbols:
+                await ws.send(json.dumps({
+                    "ticks_history": sym,
+                    "adjust_start_time": 1,
+                    "count": 60,
+                    "end": "latest",
+                    "granularity": 60,
+                    "style": "candles",
+                    "subscribe": 1
+                }))
+
+            # MAIN LOOP
+            while bot_running:
+
+                try:
+                    msg = json.loads(await ws.recv())
+                except Exception as e:
+                    print("PARSE ERROR:", e)
+                    continue
+
+                # ACCOUNT
                 update_account(msg)
 
-            # CANDLES
-            if "candles" in msg:
+                # CANDLES
+                if msg.get("candles") and "echo_req" in msg:
 
-                sym = msg["echo_req"]["ticks_history"]
-                candles[sym] = msg["candles"]
+                    sym = msg["echo_req"]["ticks_history"]
+                    candles[sym] = msg["candles"]
 
-                signal = check(sym, candles[sym])
+                    signal = check(sym, candles[sym])
 
-                if signal:
+                    if signal:
 
-                    key = f"{sym}_{signal}"
+                        key = f"{sym}_{signal}"
 
-                    if key not in last_signal or time.time() - last_signal[key] > 600:
+                        if key not in last_signal or time.time() - last_signal[key] > 600:
 
-                        last_signal[key] = time.time()
+                            last_signal[key] = time.time()
 
-                        send(f"""
-🚨 DEMO SIGNAL
+                            send(f"""
+🚨 SIGNAL (DEMO)
 
 Asset: {sym}
 Direction: {signal}
-
 Timeframe: M1
 RSI + MACD + 3+ candles
 """)
+
+    except Exception as e:
+        print("CRASH:", e)
+        traceback.print_exc()
 
 # =========================
 # START
 # =========================
 def start():
-
     t = threading.Thread(target=telegram_listener)
     t.daemon = True
     t.start()
 
     asyncio.run(run())
-
 
 start()

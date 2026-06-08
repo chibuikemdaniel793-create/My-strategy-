@@ -7,7 +7,6 @@ import websockets
 import threading
 import time
 
-# ================= CONFIG =================
 APP_ID = os.getenv("DERIV_APP_ID")
 TOKEN = os.getenv("DERIV_API_TOKEN_DEMO")
 TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -18,6 +17,8 @@ WS_URL = f"wss://ws.derivws.com/websockets/v3?app_id={APP_ID}"
 bot_running = True
 candles = {}
 account = {"balance": 0, "currency": ""}
+
+last_signal = {}
 
 # ================= TELEGRAM =================
 def send(msg):
@@ -60,9 +61,10 @@ def macd(closes):
     s = ema(m, 9)
     return m[-1], s[-1]
 
-# ================= STRATEGY =================
+# ================= YOUR STRATEGY =================
 def check(c):
-    if len(c) < 20:
+    # 🔥 YOUR RULE: must have at least 3 candles
+    if len(c) < 3:
         return None
 
     closes = np.array([x["close"] for x in c[-20:]])
@@ -72,20 +74,18 @@ def check(c):
 
     direction = "GREEN" if c[-1]["close"] > c[-1]["open"] else "RED"
 
-    # BUY condition
+    # BUY
     if r <= 30 and m > s and direction == "GREEN":
         return "BUY"
 
-    # SELL condition
+    # SELL
     if r >= 70 and m < s and direction == "RED":
         return "SELL"
 
     return None
 
 
-# ================= SIGNAL MEMORY =================
-last_signal = {}
-
+# ================= SIGNAL FILTER =================
 def allow_signal(sym, signal):
     key = f"{sym}_{signal}"
     now = time.time()
@@ -137,8 +137,8 @@ def telegram_listener():
         time.sleep(3)
 
 
-# ================= GET ALL SYNTHETICS =================
-async def get_synthetics(ws):
+# ================= GET SYNTHETIC SYMBOLS =================
+async def get_symbols(ws):
     await ws.send(json.dumps({
         "active_symbols": "full",
         "product_type": "basic"
@@ -150,16 +150,25 @@ async def get_synthetics(ws):
     for s in msg.get("active_symbols", []):
         name = s["symbol"]
 
-        # auto filter synthetic indices ONLY
-        if any(x in name for x in ["R_", "BOOM", "CRASH"]):
+        # ONLY synthetic indices (auto detected)
+        if "R_" in name or "BOOM" in name or "CRASH" in name:
             symbols.append(name)
 
     return symbols
 
 
+# ================= BALANCE HANDLER =================
+def update_balance(msg):
+    if msg.get("msg_type") == "balance" or "balance" in msg:
+        b = msg.get("balance", msg)
+
+        if isinstance(b, dict):
+            account["balance"] = b.get("balance", account["balance"])
+            account["currency"] = b.get("currency", account["currency"])
+
+
 # ================= CORE ENGINE =================
 async def run():
-    global candles
 
     async with websockets.connect(WS_URL) as ws:
 
@@ -167,17 +176,12 @@ async def run():
         await ws.send(json.dumps({"authorize": TOKEN}))
         await ws.recv()
 
-        # BALANCE STREAM
-        await ws.send(json.dumps({
-            "balance": 1,
-            "subscribe": 1
-        }))
+        # REAL DEMO BALANCE STREAM
+        await ws.send(json.dumps({"balance": 1, "subscribe": 1}))
 
         send("📊 BOT CONNECTED")
 
-        # GET ALL SYNTHETICS AUTOMATICALLY
-        symbols = await get_synthetics(ws)
-
+        symbols = await get_symbols(ws)
         send(f"🔍 Loaded {len(symbols)} synthetic assets")
 
         batch_size = 10
@@ -189,7 +193,6 @@ async def run():
 
                 for sym in batch:
 
-                    # REQUEST M1 CANDLES
                     await ws.send(json.dumps({
                         "ticks_history": sym,
                         "count": 60,
@@ -198,16 +201,15 @@ async def run():
                         "style": "candles"
                     }))
 
+                for _ in batch:
                     msg = json.loads(await ws.recv())
 
-                    # BALANCE UPDATE
-                    if "balance" in msg:
-                        b = msg["balance"]
-                        account["balance"] = b.get("balance", 0)
-                        account["currency"] = b.get("currency", "")
+                    # BALANCE
+                    update_balance(msg)
 
-                    # CANDLE PROCESSING
+                    # CANDLES
                     if "candles" in msg:
+                        sym = msg["echo_req"]["ticks_history"]
                         candles[sym] = msg["candles"]
 
                         signal = check(candles[sym])
@@ -221,8 +223,7 @@ Direction: {signal}
 Timeframe: M1
 """)
 
-                # wait before next batch (prevents timeout)
-                await asyncio.sleep(60)
+            await asyncio.sleep(60)
 
 
 # ================= START =================

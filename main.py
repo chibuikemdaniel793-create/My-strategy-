@@ -6,62 +6,45 @@ import numpy as np
 import websockets
 import threading
 import time
-import traceback
 
-# =========================
-# ENV (SAFE MODE)
-# =========================
-APP_ID = os.getenv("DERIV_APP_ID", "1089")
-TOKEN = os.getenv("DERIV_API_TOKEN_DEMO", "")
-
-TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+# ================= CONFIG =================
+APP_ID = os.getenv("DERIV_APP_ID")
+TOKEN = os.getenv("DERIV_API_TOKEN_DEMO")
+TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 WS_URL = f"wss://ws.derivws.com/websockets/v3?app_id={APP_ID}"
 
-# =========================
-# STATE
-# =========================
 bot_running = True
 candles = {}
-last_signal = {}
+account = {"balance": 0, "currency": ""}
 
-account = {
-    "balance": 0,
-    "currency": "",
-    "profit": 0
-}
-
-# =========================
-# TELEGRAM
-# =========================
+# ================= TELEGRAM =================
 def send(msg):
     try:
-        url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
-        requests.post(url, data={"chat_id": CHAT_ID, "text": msg})
+        requests.post(
+            f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
+            data={"chat_id": CHAT_ID, "text": msg}
+        )
     except:
         pass
 
-# =========================
-# RSI
-# =========================
+# ================= INDICATORS =================
 def rsi(closes, period=14):
     if len(closes) < period + 1:
         return 50
 
-    deltas = np.diff(closes)
-    gains = np.where(deltas > 0, deltas, 0)
-    losses = np.where(deltas < 0, -deltas, 0)
+    delta = np.diff(closes)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
 
-    avg_gain = np.mean(gains[-period:])
-    avg_loss = np.mean(losses[-period:]) + 1e-9
+    avg_gain = np.mean(gain[-period:])
+    avg_loss = np.mean(loss[-period:]) + 1e-9
 
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
 
-# =========================
-# MACD
-# =========================
+
 def ema(data, period):
     alpha = 2 / (period + 1)
     out = [data[0]]
@@ -73,38 +56,12 @@ def ema(data, period):
 def macd(closes):
     e12 = ema(closes, 12)
     e26 = ema(closes, 26)
-
     m = e12[-len(e26):] - e26
     s = ema(m, 9)
-
     return m[-1], s[-1]
 
-# =========================
-# CANDLE STREAK
-# =========================
-def streak(c):
-    if len(c) < 3:
-        return None, 0
-
-    last = c[-1]
-    direction = "GREEN" if last["close"] > last["open"] else "RED"
-    count = 1
-
-    for i in range(len(c) - 2, -1, -1):
-        x = c[i]
-        if direction == "GREEN" and x["close"] > x["open"]:
-            count += 1
-        elif direction == "RED" and x["close"] < x["open"]:
-            count += 1
-        else:
-            break
-
-    return direction, count
-
-# =========================
-# STRATEGY
-# =========================
-def check(symbol, c):
+# ================= STRATEGY =================
+def check(c):
     if len(c) < 20:
         return None
 
@@ -113,35 +70,34 @@ def check(symbol, c):
     r = rsi(closes)
     m, s = macd(closes)
 
-    direction, st = streak(c)
+    direction = "GREEN" if c[-1]["close"] > c[-1]["open"] else "RED"
 
-    if st < 3:
-        return None
-
+    # BUY condition
     if r <= 30 and m > s and direction == "GREEN":
         return "BUY"
 
+    # SELL condition
     if r >= 70 and m < s and direction == "RED":
         return "SELL"
 
     return None
 
-# =========================
-# ACCOUNT
-# =========================
-def update_account(msg):
-    try:
-        if msg.get("balance"):
-            b = msg["balance"]
-            account["balance"] = b.get("balance", 0)
-            account["currency"] = b.get("currency", "")
-            account["profit"] = b.get("profit", 0)
-    except:
-        pass
 
-# =========================
-# TELEGRAM CONTROL
-# =========================
+# ================= SIGNAL MEMORY =================
+last_signal = {}
+
+def allow_signal(sym, signal):
+    key = f"{sym}_{signal}"
+    now = time.time()
+
+    if key in last_signal and now - last_signal[key] < 600:
+        return False
+
+    last_signal[key] = now
+    return True
+
+
+# ================= TELEGRAM CONTROL =================
 def telegram_listener():
     global bot_running
 
@@ -149,8 +105,9 @@ def telegram_listener():
 
     while True:
         try:
-            url = f"https://api.telegram.org/bot{TG_TOKEN}/getUpdates"
-            res = requests.get(url).json()
+            res = requests.get(
+                f"https://api.telegram.org/bot{TG_TOKEN}/getUpdates"
+            ).json()
 
             for u in res.get("result", []):
 
@@ -158,128 +115,123 @@ def telegram_listener():
                     continue
 
                 last = u["update_id"]
-
                 text = u.get("message", {}).get("text", "")
 
                 if text == "/start":
-                    send("✅ BOT ACTIVE (DEMO MODE)\nScanning M1 markets...")
+                    bot_running = True
+                    send("✅ BOT STARTED")
 
                 elif text == "/stop":
                     bot_running = False
                     send("🛑 BOT STOPPED")
 
                 elif text == "/status":
-                    send(f"RUNNING: {bot_running}\nMODE: DEMO")
+                    send(f"RUNNING: {bot_running}")
 
                 elif text == "/balance":
-                    send(f"""
-💰 DEMO ACCOUNT
-Balance: {account['balance']} {account['currency']}
-Profit: {account['profit']}
-""")
+                    send(f"BALANCE: {account['balance']} {account['currency']}")
 
         except:
             pass
 
         time.sleep(3)
 
-# =========================
-# DERIV ENGINE
-# =========================
+
+# ================= GET ALL SYNTHETICS =================
+async def get_synthetics(ws):
+    await ws.send(json.dumps({
+        "active_symbols": "full",
+        "product_type": "basic"
+    }))
+
+    msg = json.loads(await ws.recv())
+
+    symbols = []
+    for s in msg.get("active_symbols", []):
+        name = s["symbol"]
+
+        # auto filter synthetic indices ONLY
+        if any(x in name for x in ["R_", "BOOM", "CRASH"]):
+            symbols.append(name)
+
+    return symbols
+
+
+# ================= CORE ENGINE =================
 async def run():
     global candles
 
-    try:
-        async with websockets.connect(WS_URL) as ws:
+    async with websockets.connect(WS_URL) as ws:
 
-            # AUTH
-            await ws.send(json.dumps({"authorize": TOKEN}))
-            await ws.recv()
+        # AUTH
+        await ws.send(json.dumps({"authorize": TOKEN}))
+        await ws.recv()
 
-            # BALANCE STREAM
-            await ws.send(json.dumps({"balance": 1, "subscribe": 1}))
+        # BALANCE STREAM
+        await ws.send(json.dumps({
+            "balance": 1,
+            "subscribe": 1
+        }))
 
-            # SYMBOLS REQUEST
-            await ws.send(json.dumps({
-                "active_symbols": "full",
-                "product_type": "basic"
-            }))
+        send("📊 BOT CONNECTED")
 
-            # SAFE SYMBOL READ
-            symbols = []
-            while True:
-                msg = json.loads(await ws.recv())
+        # GET ALL SYNTHETICS AUTOMATICALLY
+        symbols = await get_synthetics(ws)
 
-                if "error" in msg:
-                    continue
+        send(f"🔍 Loaded {len(symbols)} synthetic assets")
 
-                if "active_symbols" in msg:
-                    symbols = [s["symbol"] for s in msg["active_symbols"]]
-                    break
+        batch_size = 10
 
-            send(f"📊 Loaded {len(symbols)} symbols (DEMO MODE)")
+        while bot_running:
 
-            # SUBSCRIBE CANDLES
-            for sym in symbols:
-                await ws.send(json.dumps({
-                    "ticks_history": sym,
-                    "adjust_start_time": 1,
-                    "count": 60,
-                    "end": "latest",
-                    "granularity": 60,
-                    "style": "candles",
-                    "subscribe": 1
-                }))
+            for i in range(0, len(symbols), batch_size):
+                batch = symbols[i:i+batch_size]
 
-            # MAIN LOOP
-            while bot_running:
+                for sym in batch:
 
-                try:
+                    # REQUEST M1 CANDLES
+                    await ws.send(json.dumps({
+                        "ticks_history": sym,
+                        "count": 60,
+                        "end": "latest",
+                        "granularity": 60,
+                        "style": "candles"
+                    }))
+
                     msg = json.loads(await ws.recv())
-                except Exception as e:
-                    print("PARSE ERROR:", e)
-                    continue
 
-                # ACCOUNT
-                update_account(msg)
+                    # BALANCE UPDATE
+                    if "balance" in msg:
+                        b = msg["balance"]
+                        account["balance"] = b.get("balance", 0)
+                        account["currency"] = b.get("currency", "")
 
-                # CANDLES
-                if msg.get("candles") and "echo_req" in msg:
+                    # CANDLE PROCESSING
+                    if "candles" in msg:
+                        candles[sym] = msg["candles"]
 
-                    sym = msg["echo_req"]["ticks_history"]
-                    candles[sym] = msg["candles"]
+                        signal = check(candles[sym])
 
-                    signal = check(sym, candles[sym])
-
-                    if signal:
-
-                        key = f"{sym}_{signal}"
-
-                        if key not in last_signal or time.time() - last_signal[key] > 600:
-
-                            last_signal[key] = time.time()
-
+                        if signal and allow_signal(sym, signal):
                             send(f"""
-🚨 SIGNAL (DEMO)
+🚨 SIGNAL
 
 Asset: {sym}
 Direction: {signal}
 Timeframe: M1
-RSI + MACD + 3+ candles
 """)
 
-    except Exception as e:
-        print("CRASH:", e)
-        traceback.print_exc()
+                # wait before next batch (prevents timeout)
+                await asyncio.sleep(60)
 
-# =========================
-# START
-# =========================
+
+# ================= START =================
 def start():
     t = threading.Thread(target=telegram_listener)
     t.daemon = True
     t.start()
 
     asyncio.run(run())
+
 
 start()
